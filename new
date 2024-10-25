@@ -1,0 +1,66 @@
+The "KeyError: 1" you're encountering in the "update states based on hit counts" section typically suggests that the progression_states list does not contain a state that is being referenced by index. To fix this, we can ensure that we correctly manage state transitions based on existing states in the state_map.
+
+Here’s the modified section of the code to handle state updates and avoid the KeyError:
+
+# Update states based on hit counts
+for track_id, track in enumerate(tracks):
+    current_state = state_map.get(track_id, None)
+    if current_state is not None:  # Ensure the current state exists
+        current_state_index = progression_states.index(current_state)
+        
+        # Check if hit counts meet criteria for transitioning to 'Firm'
+        if hit_counts[track_id] >= firm_threshold and current_state != 'Firm':
+            state_map[track_id] = 'Firm'
+            firm_ids.add(track_id)
+            state_transition_times.setdefault(track_id, {})['Firm'] = current_time
+            
+        # Check for other state transitions
+        elif current_state_index < len(progression_states) - 1:
+            next_state = progression_states[current_state_index + 1]
+            if hit_counts[track_id] >= current_state_index + 1 and state_map[track_id] != next_state:
+                state_map[track_id] = next_state
+                state_transition_times.setdefault(track_id, {})[next_state] = current_time
+
+        track['current_state'] = state_map[track_id]
+
+Full Adjusted Code Snippet
+
+Replace the section in your main function with the code above. Here's how the complete part looks:
+
+# Update states based on hit counts
+for track_id, track in enumerate(tracks):
+    current_state = state_map.get(track_id, None)
+    if current_state is not None:  # Ensure the current state exists
+        current_state_index = progression_states.index(current_state)
+        
+        # Check if hit counts meet criteria for transitioning to 'Firm'
+        if hit_counts[track_id] >= firm_threshold and current_state != 'Firm':
+            state_map[track_id] = 'Firm'
+            firm_ids.add(track_id)
+            state_transition_times.setdefault(track_id, {})['Firm'] = current_time
+            
+        # Check for other state transitions
+        elif current_state_index < len(progression_states) - 1:
+            next_state = progression_states[current_state_index + 1]
+            if hit_counts[track_id] >= current_state_index + 1 and state_map[track_id] != next_state:
+                state_map[track_id] = next_state
+                state_transition_times.setdefault(track_id, {})[next_state] = current_time
+
+        track['current_state'] = state_map[track_id]
+
+Summary of Changes
+
+1. Added a check to ensure current_state is not None before trying to access progression_states.
+
+
+2. Maintained the logic for transitioning to the 'Firm' state and managing other state transitions based on hit counts.
+
+
+
+Additional Tips
+
+Make sure that progression_states is always populated correctly, and that every possible current state is in it.
+
+It might be helpful to add logging or print statements to monitor state transitions and the values of hit_counts and state_map if errors persist.
+
+
