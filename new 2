@@ -1,0 +1,188 @@
+To address the KeyError in your code, especially in the part where you're updating states based on hit counts, it's important to ensure that you handle cases where a track ID might not have an entry in the state_map or where the progression state might not be indexed correctly.
+
+Here’s a revised version of your code with added error handling:
+
+def main(input_file, track_mode, filter_option, association_type):
+    log_file_path = 'detailed_log.csv'
+
+    # Initialize CSV log file
+    with open(log_file_path, 'w', newline='') as csvfile:
+        fieldnames = ['Time', 'Measurement X', 'Measurement Y', 'Measurement Z', 'Current State',
+                      'Correlation Output', 'Associated Track ID', 'Associated Position X',
+                      'Associated Position Y', 'Associated Position Z', 'Association Type',
+                      'Clusters Formed', 'Hypotheses Generated', 'Probability of Hypothesis',
+                      'Best Report Selected']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+
+    measurements = read_measurements_from_csv(input_file)
+
+    if filter_option == "CV":
+        kalman_filter = CVFilter()
+    elif filter_option == "CA":
+        kalman_filter = CAFilter()
+    else:
+        raise ValueError("Invalid filter option selected.")
+
+    measurement_groups = form_measurement_groups(measurements, max_time_diff=0.050)
+
+    tracks = []
+    track_id_list = []
+    filter_states = []
+
+    doppler_threshold = 100
+    range_threshold = 100
+    firm_threshold = select_initiation_mode(track_mode)
+    association_method = association_type  # 'JPDA' or 'Munkres'
+
+    # Initialize variables outside the loop
+    miss_counts = {}
+    hit_counts = {}
+    firm_ids = set()
+    state_map = {}
+    state_transition_times = {}
+    progression_states = {
+        3: ['Poss1', 'Tentative1', 'Firm'],
+        5: ['Poss1', 'Poss2', 'Tentative1', 'Tentative2', 'Firm'],
+        7: ['Poss1', 'Poss2', 'Tentative1', 'Tentative2', 'Tentative3', 'Firm']
+    }[firm_threshold]
+
+    last_check_time = 0
+    check_interval = 0.0005  # 0.5 ms
+
+    for group_idx, group in enumerate(measurement_groups):
+        print(f"Processing measurement group {group_idx + 1}...")
+
+        current_time = group[0][3]  # Assuming the time is at index 3 of each measurement
+
+        # Periodic checking
+        if current_time - last_check_time >= check_interval:
+            tracks_to_remove = check_track_timeout(tracks, current_time)
+            for track_id in reversed(tracks_to_remove):
+                print(f"Removing track {track_id} due to timeout")
+                del tracks[track_id]
+                track_id_list[track_id]['state'] = 'free'
+                if track_id in firm_ids:
+                    firm_ids.remove(track_id)
+                state_map.pop(track_id, None)
+                hit_counts.pop(track_id, None)
+                miss_counts.pop(track_id, None)
+            last_check_time = current_time
+
+        if len(group) == 1:  # Single measurement
+            measurement = group[0]
+            assigned = False
+            for track_id, track in enumerate(tracks):
+                if correlation_check(track, measurement, doppler_threshold, range_threshold):
+                    current_state = state_map.get(track_id, None)
+                    if current_state == 'Poss1':
+                        initialize_filter_state(kalman_filter, *sph2cart(*measurement[:3]), 0, 0, 0, measurement[3])
+                    elif current_state == 'Tentative1':
+                        last_measurement = track['measurements'][-1][0]
+                        dt = measurement[3] - last_measurement[3]
+                        vx = (sph2cart(*measurement[:3])[0] - sph2cart(*last_measurement[:3])[0]) / dt
+                        vy = (sph2cart(*measurement[:3])[1] - sph2cart(*last_measurement[:3])[1]) / dt
+                        vz = (sph2cart(*measurement[:3])[2] - sph2cart(*last_measurement[:3])[2]) / dt
+                        initialize_filter_state(kalman_filter, *sph2cart(*measurement[:3]), vx, vy, vz, measurement[3])
+                    elif current_state == 'Firm':
+                        kalman_filter.predict_step(measurement[3])
+                        kalman_filter.update_step(np.array(sph2cart(*measurement[:3])).reshape(3, 1))
+
+                    track['measurements'].append((measurement, current_state))
+                    track['Sf'] = kalman_filter.Sf.copy()
+                    track['Sp'] = kalman_filter.Sp.copy()
+                    track['Pp'] = kalman_filter.Pp.copy()
+                    track['Pf'] = kalman_filter.Pf.copy()
+                    hit_counts[track_id] = hit_counts.get(track_id, 0) + 1
+                    assigned = True
+
+                    # Log data to CSV
+                    log_data = {
+                        'Time': measurement[3],
+                        'Measurement X': measurement[5],
+                        'Measurement Y': measurement[6],
+                        'Measurement Z': measurement[7],
+                        'Current State': current_state,
+                        'Correlation Output': 'Yes',
+                        'Associated Track ID': track_id,
+                        'Associated Position X': track['Sf'][0, 0],
+                        'Associated Position Y': track['Sf'][1, 0],
+                        'Associated Position Z': track['Sf'][2, 0],
+                        'Association Type': 'Single',
+                        'Clusters Formed': '',
+                        'Hypotheses Generated': '',
+                        'Probability of Hypothesis': '',
+                        'Best Report Selected': ''
+                    }
+                    log_to_csv(log_file_path, log_data)
+                    break
+
+            if not assigned:
+                new_track_id = next((i for i, t in enumerate(track_id_list) if t['state'] == 'free'), None)
+                if new_track_id is None:
+                    new_track_id = len(track_id_list)
+                    track_id_list.append({'id': new_track_id, 'state': 'occupied'})
+                else:
+                    track_id_list[new_track_id]['state'] = 'occupied'
+
+                tracks.append({
+                    'track_id': new_track_id,
+                    'measurements': [(measurement, 'Poss1')],
+                    'current_state': 'Poss1',
+                    'Sf': kalman_filter.Sf.copy(),
+                    'Sp': kalman_filter.Sp.copy(),
+                    'Pp': kalman_filter.Pp.copy(),
+                    'Pf': kalman_filter.Pf.copy()
+                })
+                state_map[new_track_id] = 'Poss1'
+                state_transition_times[new_track_id] = {'Poss1': current_time}
+                hit_counts[new_track_id] = 1
+                initialize_filter_state(kalman_filter, *sph2cart(*measurement[:3]), 0, 0, 0, measurement[3])
+
+                # Log data to CSV
+                log_data = {
+                    'Time': measurement[3],
+                    'Measurement X': measurement[5],
+                    'Measurement Y': measurement[6],
+                    'Measurement Z': measurement[7],
+                    'Current State': 'Poss1',
+                    'Correlation Output': 'No',
+                    'Associated Track ID': new_track_id,
+                    'Associated Position X': '',
+                    'Associated Position Y': '',
+                    'Associated Position Z': '',
+                    'Association Type': 'New',
+                    'Clusters Formed': '',
+                    'Hypotheses Generated': '',
+                    'Probability of Hypothesis': '',
+                    'Best Report Selected': ''
+                }
+                log_to_csv(log_file_path, log_data)
+
+        else:  # Multiple measurements
+            reports = [sph2cart(*m[:3]) for m in group]
+            if association_method == 'JPDA':
+                clusters, best_reports, hypotheses, probabilities = perform_jpda(
+                    [track['measurements'][-1][0][:3] for track in tracks], reports, kalman_filter
+                )
+            elif association_method == 'Munkres':
+                best_reports = perform_munkres([track['measurements'][-1][0][:3] for track in tracks], reports, kalman_filter)
+
+            for track_id, best_report in best_reports:
+                current_state = state_map.get(track_id, None)
+                if current_state == 'Poss1':
+                    initialize_filter_state(kalman_filter, *best_report, 0, 0, 0, group[0][3])
+                elif current_state == 'Tentative1':
+                    last_measurement = tracks[track_id]['measurements'][-1][0]
+                    dt = group[0][3] - last_measurement[3]
+                    vx = (best_report[0] - sph2cart(*last_measurement[:3])[0]) / dt
+                    vy = (best_report[1] - sph2cart(*last_measurement[:3])[1]) / dt
+                    vz = (best_report[2] - sph2cart(*last_measurement[:3])[2]) / dt
+                    initialize_filter_state(kalman_filter, *best_report, vx, vy, vz, group[0][3])
+                elif current_state == 'Firm':
+                    kalman_filter.predict_step(group[0][3])
+                    kalman_filter.update_step(np.array(best_report).reshape(3, 1))
+
+                tracks[track_id]['measurements'].append((cart2sph(*best_report) + (group[0][3], group[0][4]), current_state))
+                tracks[track_id]['Sf'] = kalman_filter.Sf.copy()
+
